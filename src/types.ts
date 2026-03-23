@@ -40,6 +40,9 @@ export interface Booking {
   reallocated: number;
   offer_code?: string;
   final_price?: number;
+  cancellation_reason?: string;
+  refund_status?: "none" | "pending" | "refunded";
+  payment_status?: "paid" | "pending" | "failed";
 }
 
 export interface WaitlistEntry {

@@ -94,6 +94,9 @@ const addColumnIfNotExists = (table: string, column: string, type: string) => {
 addColumnIfNotExists("guests", "mobile", "TEXT");
 addColumnIfNotExists("bookings", "offer_code", "TEXT");
 addColumnIfNotExists("bookings", "final_price", "REAL");
+addColumnIfNotExists("bookings", "cancellation_reason", "TEXT");
+addColumnIfNotExists("bookings", "refund_status", "TEXT");
+addColumnIfNotExists("bookings", "payment_status", "TEXT DEFAULT 'pending'");
 
 // Seed Data
 const seedData = () => {
@@ -369,8 +372,8 @@ async function startServer() {
     }
 
     if (selectedTherapist && selectedRoom) {
-      const result = db.prepare("INSERT INTO bookings (guest_id, service_id, therapist_id, room_id, start_time, offer_code, final_price) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(guest.id, serviceId, selectedTherapist.id, selectedRoom.id, startTime, offerCode, finalPrice);
+      const result = db.prepare("INSERT INTO bookings (guest_id, service_id, therapist_id, room_id, start_time, offer_code, final_price, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(guest.id, serviceId, selectedTherapist.id, selectedRoom.id, startTime, offerCode, finalPrice, 'pending');
       
       // Notification
       db.prepare("INSERT INTO notifications (guest_id, message, type) VALUES (?, ?, ?)")
@@ -404,6 +407,95 @@ async function startServer() {
     }
   });
 
+  app.put("/api/bookings/:id", (req, res) => {
+    const { id } = req.params;
+    const { guestName, mobileNumber, serviceId, startTime, isVip, offerCode, therapistId, roomId, payment_status } = req.body;
+
+    const booking = db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as any;
+    if (!booking) return res.status(404).json({ success: false, message: "Booking not found" });
+
+    // Handle simple status updates (like payment_status)
+    if (payment_status && !serviceId) {
+       db.prepare("UPDATE bookings SET payment_status = ? WHERE id = ?").run(payment_status, id);
+       return res.json({ success: true, message: "Payment status updated!" });
+    }
+
+    const service = db.prepare("SELECT * FROM services WHERE id = ?").get(serviceId) as any;
+    const endTime = format(addMinutes(parse(startTime, "yyyy-MM-dd HH:mm", new Date()), service.duration), "yyyy-MM-dd HH:mm");
+
+    // Check Availability (Therapist and Room) - excluding current booking
+    const therapists = db.prepare("SELECT * FROM therapists").all() as any[];
+    const rooms = db.prepare("SELECT * FROM rooms").all() as any[];
+
+    let selectedTherapist = null;
+    let selectedRoom = null;
+
+    if (therapistId) {
+      const t = therapists.find(th => th.id.toString() === therapistId);
+      if (t) {
+        const conflict = db.prepare(`
+          SELECT b.*, s.duration 
+          FROM bookings b 
+          JOIN services s ON b.service_id = s.id 
+          WHERE b.therapist_id = ? AND b.status = 'confirmed' AND b.id != ?
+        `).all(t.id, id) as any[];
+
+        const isBusy = conflict.some(c => {
+          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
+          const bEnd = addMinutes(bStart, c.duration);
+          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
+          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
+          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
+                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
+                 (reqStart <= bStart && reqEnd >= bEnd);
+        });
+        if (!isBusy) selectedTherapist = t;
+      }
+    }
+
+    if (roomId) {
+      const r = rooms.find(rm => rm.id.toString() === roomId);
+      if (r) {
+        const conflict = db.prepare(`
+          SELECT b.*, s.duration 
+          FROM bookings b 
+          JOIN services s ON b.service_id = s.id 
+          WHERE b.room_id = ? AND b.status = 'confirmed' AND b.id != ?
+        `).all(r.id, id) as any[];
+
+        const isBusy = conflict.some(c => {
+          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
+          const bEnd = addMinutes(bStart, c.duration);
+          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
+          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
+          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
+                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
+                 (reqStart <= bStart && reqEnd >= bEnd);
+        });
+        if (!isBusy) selectedRoom = r;
+      }
+    }
+
+    const OFFERS: Record<string, number> = {
+      "SPA10": 0.1,
+      "WELCOME20": 0.2,
+      "AI_SPECIAL": 0.15
+    };
+    let finalPrice = service.price;
+    if (offerCode && OFFERS[offerCode.toUpperCase()]) {
+      finalPrice = service.price * (1 - OFFERS[offerCode.toUpperCase()]);
+    }
+
+    if (selectedTherapist && selectedRoom) {
+      db.prepare("UPDATE bookings SET service_id = ?, therapist_id = ?, room_id = ?, start_time = ?, offer_code = ?, final_price = ?, payment_status = ? WHERE id = ?")
+        .run(serviceId, selectedTherapist.id, selectedRoom.id, startTime, offerCode, finalPrice, payment_status || 'pending', id);
+      
+      res.json({ success: true, message: "Booking modified successfully!" });
+    } else {
+      res.status(400).json({ success: false, message: "Selected time/therapist/room is unavailable for modification." });
+    }
+  });
+
   app.get("/api/bookings", (req, res) => {
     const bookings = db.prepare(`
       SELECT b.*, g.name as guest_name, g.mobile as guest_mobile, s.name as service_name, t.name as therapist_name, r.name as room_name
@@ -419,10 +511,12 @@ async function startServer() {
 
   app.post("/api/bookings/:id/cancel", (req, res) => {
     const { id } = req.params;
+    const { reason, refundStatus } = req.body;
     const booking = db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as any;
     if (!booking) return res.status(404).json({ message: "Booking not found" });
 
-    db.prepare("UPDATE bookings SET status = 'cancelled' WHERE id = ?").run(id);
+    db.prepare("UPDATE bookings SET status = 'cancelled', cancellation_reason = ?, refund_status = ? WHERE id = ?")
+      .run(reason || "No reason provided", refundStatus || "none", id);
 
     // AI Reallocation Logic
     const waitlist = db.prepare("SELECT w.*, g.is_vip, s.duration, s.name as service_name FROM waitlist w JOIN guests g ON w.guest_id = g.id JOIN services s ON w.service_id = s.id WHERE w.status = 'waiting'").all() as any[];

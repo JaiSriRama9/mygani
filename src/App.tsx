@@ -23,7 +23,10 @@ import {
   MessageSquare,
   Smartphone,
   X,
-  Plus
+  Plus,
+  Search,
+  QrCode,
+  CreditCard
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { format, addDays, startOfToday, parse, addMinutes } from "date-fns";
@@ -60,6 +63,8 @@ export default function App() {
   const [viewBy, setViewBy] = useState<"therapist" | "room">("therapist");
   const [peakFilter, setPeakFilter] = useState<"all" | "peak" | "off-peak">("all");
   const [durationFilter, setDurationFilter] = useState<string>("all");
+  const [showAllBookings, setShowAllBookings] = useState(true);
+  const [bookingSearch, setBookingSearch] = useState("");
   
   const [user, setUser] = useState<{ name: string, email: string, mobile: string, age: string } | null>(null);
   const [showAuth, setShowAuth] = useState(false);
@@ -76,10 +81,21 @@ export default function App() {
     therapistId: "",
     roomId: "",
     isVip: false,
-    offerCode: ""
+    offerCode: "",
+    paymentStatus: "pending"
   });
 
   const [appliedOffer, setAppliedOffer] = useState<{ code: string, discount: number } | null>(null);
+
+  const [editingBookingId, setEditingBookingId] = useState<number | null>(null);
+
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
+  const [cancellationReason, setCancellationReason] = useState("");
+
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"counter" | "qr" | "card">("counter");
+  const [lastBookingData, setLastBookingData] = useState<any>(null);
 
   const OFFERS: Record<string, number> = {
     "SPA10": 0.1,
@@ -145,6 +161,15 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (message) {
+      const timer = setTimeout(() => {
+        setMessage(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [message]);
+
+  useEffect(() => {
     fetchData();
   }, [availabilityDate]);
 
@@ -173,9 +198,57 @@ export default function App() {
     setMessage({ type: "success", text: "Daily slots generated and optimized!" });
   };
 
+  const performBooking = async (formData: typeof bookingForm, id: number | null = null) => {
+    setLoading(true);
+    try {
+      const url = id ? `/api/bookings/${id}` : "/api/bookings";
+      const method = id ? "PUT" : "POST";
+      
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setLastBookingData({
+          ...formData,
+          id: data.bookingId || id,
+          serviceName: services.find(s => s.id.toString() === formData.serviceId)?.name,
+          price: calculatePrice()
+        });
+        setShowPaymentModal(true);
+        setBookingForm({ guestName: "", mobileNumber: "", serviceId: "", startTime: "", therapistId: "", roomId: "", isVip: false, offerCode: "", paymentStatus: "pending" });
+        setAppliedOffer(null);
+        setEditingBookingId(null);
+        fetchData();
+      } else {
+        setMessage({ 
+          type: "error", 
+          text: data.message, 
+          alternatives: data.alternatives 
+        });
+      }
+    } catch (err) {
+      setMessage({ type: "error", text: "Booking failed. Try again." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleBooking = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Validation
+    if (bookingForm.guestName.trim().length < 2) {
+      setMessage({ type: "error", text: "Guest name must be at least 2 characters." });
+      return;
+    }
+    if (bookingForm.mobileNumber.length < 10) {
+      setMessage({ type: "error", text: "Please enter a valid 10-digit mobile number." });
+      return;
+    }
+
     // Working hours validation
     if (!bookingForm.startTime) {
       setMessage({ type: "error", text: "Please select a time slot." });
@@ -191,33 +264,25 @@ export default function App() {
       return;
     }
 
-    setLoading(true);
-    try {
-      const res = await fetch("/api/bookings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bookingForm)
-      });
-      const data = await res.json();
-      if (data.success) {
-        setMessage({ type: "success", text: data.message });
-        setBookingForm({ guestName: "", mobileNumber: "", serviceId: "", startTime: "", therapistId: "", roomId: "", isVip: false, offerCode: "" });
-        setAppliedOffer(null);
-        fetchData();
-      } else {
-        setMessage({ 
-          type: "error", 
-          text: data.message, 
-          alternatives: data.alternatives 
-        });
-      }
-    } catch (err) {
-      setMessage({ type: "error", text: "Booking failed. Try again." });
-    }
-    setLoading(false);
+    await performBooking(bookingForm, editingBookingId);
   };
 
   const handleWaitlist = async () => {
+    if (!bookingForm.guestName || !bookingForm.serviceId || !bookingForm.startTime) {
+      setMessage({ type: "error", text: "Please fill in guest name, service, and preferred time." });
+      return;
+    }
+    
+    // Validation
+    if (bookingForm.guestName.trim().length < 2) {
+      setMessage({ type: "error", text: "Guest name must be at least 2 characters." });
+      return;
+    }
+    if (bookingForm.mobileNumber.length < 10) {
+      setMessage({ type: "error", text: "Please enter a valid 10-digit mobile number." });
+      return;
+    }
+
     // Working hours validation
     const bookingTime = parse(bookingForm.startTime, "yyyy-MM-dd HH:mm", new Date());
     const hour = bookingTime.getHours();
@@ -244,7 +309,7 @@ export default function App() {
       });
       const data = await res.json();
       setMessage({ type: "success", text: `Added to waitlist! Priority Score: ${data.score}` });
-      setBookingForm({ guestName: "", mobileNumber: "", serviceId: "", startTime: "", isVip: false, offerCode: "" });
+      setBookingForm({ guestName: "", mobileNumber: "", serviceId: "", startTime: "", therapistId: "", roomId: "", isVip: false, offerCode: "", paymentStatus: "pending" });
       setAppliedOffer(null);
       fetchData();
     } catch (err) {
@@ -253,11 +318,68 @@ export default function App() {
     setLoading(false);
   };
 
-  const cancelBooking = async (id: number) => {
-    if (!confirm("Are you sure you want to cancel this booking?")) return;
-    await fetch(`/api/bookings/${id}/cancel`, { method: "POST" });
-    fetchData();
-    setMessage({ type: "success", text: "Booking cancelled. AI is checking waitlist for reallocation..." });
+  const cancelBooking = (booking: Booking) => {
+    setCancellingBooking(booking);
+    setCancellationReason("");
+    setShowCancelModal(true);
+  };
+
+  const handleModify = (booking: Booking) => {
+    setBookingForm({
+      guestName: booking.guest_name,
+      mobileNumber: booking.guest_mobile || "",
+      serviceId: booking.service_id.toString(),
+      startTime: booking.start_time,
+      therapistId: booking.therapist_id.toString(),
+      roomId: booking.room_id.toString(),
+      isVip: false, // Assuming default
+      offerCode: booking.offer_code || "",
+      paymentStatus: booking.payment_status || "pending"
+    });
+    if (booking.offer_code && OFFERS[booking.offer_code.toUpperCase()]) {
+      setAppliedOffer({ code: booking.offer_code.toUpperCase(), discount: OFFERS[booking.offer_code.toUpperCase()] });
+    } else {
+      setAppliedOffer(null);
+    }
+    setEditingBookingId(booking.id);
+    setShowCancelModal(false);
+    setActiveTab("dashboard");
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const confirmCancellation = async () => {
+    if (!cancellingBooking) return;
+    
+    setLoading(true);
+    try {
+      // Calculate refund eligibility (e.g., 24h notice)
+      const bookingTime = new Date(cancellingBooking.start_time).getTime();
+      const now = new Date().getTime();
+      const hoursDiff = (bookingTime - now) / (1000 * 60 * 60);
+      const refundStatus = hoursDiff >= 24 ? "refunded" : "none";
+
+      await fetch(`/api/bookings/${cancellingBooking.id}/cancel`, { 
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          reason: cancellationReason,
+          refundStatus
+        })
+      });
+      
+      fetchData();
+      setShowCancelModal(false);
+      setCancellingBooking(null);
+      setMessage({ 
+        type: "success", 
+        text: refundStatus === "refunded" 
+          ? "Booking cancelled successfully. Full refund processed." 
+          : "Booking cancelled. No refund issued (less than 24h notice)." 
+      });
+    } catch (err) {
+      setMessage({ type: "error", text: "Failed to cancel booking." });
+    }
+    setLoading(false);
   };
 
   return (
@@ -437,6 +559,90 @@ export default function App() {
               </motion.div>
             </div>
           )}
+
+          {showCancelModal && cancellingBooking && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl relative"
+              >
+                <button 
+                  onClick={() => setShowCancelModal(false)}
+                  className="absolute top-6 right-6 p-2 hover:bg-gray-100 rounded-xl transition-colors"
+                >
+                  <X size={20} />
+                </button>
+
+                <div className="text-center mb-8">
+                  <div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <XCircle size={32} />
+                  </div>
+                  <h2 className="text-2xl font-bold">Cancel Booking</h2>
+                  <p className="text-gray-500 text-sm mt-2">
+                    Are you sure you want to cancel your booking for <strong>{cancellingBooking.service_name}</strong>?
+                  </p>
+                  <div className="mt-4 p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-left">
+                    <p className="text-xs font-bold text-emerald-700 uppercase mb-1">💡 Smart Advice</p>
+                    <p className="text-xs text-emerald-600 leading-relaxed">
+                      Instead of cancelling, you can <strong>modify your booking</strong> to a different time or therapist. This preserves your spot and avoids cancellation fees!
+                    </p>
+                    <button 
+                      onClick={() => handleModify(cancellingBooking)}
+                      className="mt-3 w-full py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 transition-all"
+                    >
+                      Modify Instead
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1 ml-1">Reason for Cancellation</label>
+                    <textarea 
+                      value={cancellationReason}
+                      onChange={(e) => setCancellationReason(e.target.value)}
+                      placeholder="e.g. Personal emergency, changed plans..."
+                      className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-red-500 outline-none h-24 resize-none"
+                    />
+                  </div>
+
+                  <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                    <p className="text-xs font-bold text-gray-400 uppercase mb-2">Refund Policy</p>
+                    <div className="flex items-center gap-2">
+                      <div className={cn(
+                        "w-2 h-2 rounded-full",
+                        (new Date(cancellingBooking.start_time).getTime() - new Date().getTime()) / (1000 * 60 * 60) >= 24 
+                          ? "bg-emerald-500" : "bg-amber-500"
+                      )}></div>
+                      <p className="text-sm font-medium">
+                        {(new Date(cancellingBooking.start_time).getTime() - new Date().getTime()) / (1000 * 60 * 60) >= 24 
+                          ? "Eligible for full refund (24h+ notice)" 
+                          : "No refund (Less than 24h notice)"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 pt-4">
+                    <button 
+                      onClick={() => setShowCancelModal(false)}
+                      className="flex-1 py-3 rounded-xl font-bold text-gray-500 hover:bg-gray-100 transition-all"
+                    >
+                      Keep Booking
+                    </button>
+                    <button 
+                      onClick={confirmCancellation}
+                      disabled={loading}
+                      className="flex-1 bg-red-600 text-white py-3 rounded-xl font-bold hover:bg-red-700 transition-all shadow-lg shadow-red-100 disabled:opacity-50"
+                    >
+                      Confirm Cancel
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
         </AnimatePresence>
 
         <AnimatePresence mode="wait">
@@ -447,12 +653,23 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className={cn(
                 "fixed top-6 left-1/2 -translate-x-1/2 z-[100] w-full max-w-2xl p-4 rounded-2xl shadow-2xl border backdrop-blur-md flex flex-col gap-4",
-                message.type === "success" ? "bg-emerald-50/90 text-emerald-700 border-emerald-100" : "bg-red-50/90 text-red-700 border-red-100"
+                (message.type === "success" || (message.alternatives && message.alternatives.length > 0)) ? "bg-emerald-50/90 text-emerald-700 border-emerald-100" : "bg-red-50/90 text-red-700 border-red-100"
               )}
             >
               <div className="flex items-center gap-3">
-                {message.type === "success" ? <CheckCircle2 size={20} /> : <XCircle size={20} />}
+                {(message.type === "success" || (message.alternatives && message.alternatives.length > 0)) ? <CheckCircle2 size={20} /> : <XCircle size={20} />}
                 <span className="font-bold">{message.text}</span>
+                {(message.text.includes("Slot unavailable") || message.text.includes("This slot is currently booked")) && (
+                  <button 
+                    onClick={() => {
+                      handleWaitlist();
+                      setMessage(null);
+                    }}
+                    className="ml-4 px-4 py-1.5 bg-amber-100 text-amber-700 rounded-lg text-sm font-bold hover:bg-amber-200 transition-colors"
+                  >
+                    Join Waitlist
+                  </button>
+                )}
                 {message.text.includes("9:00 AM to 7:00 PM") && (
                   <button 
                     onClick={() => {
@@ -475,14 +692,16 @@ export default function App() {
                       <button
                         key={i}
                         onClick={() => {
-                          setBookingForm({ ...bookingForm, startTime: alt.start_time });
+                          const updatedForm = { ...bookingForm, startTime: alt.start_time };
+                          setBookingForm(updatedForm);
                           setMessage(null);
+                          performBooking(updatedForm, editingBookingId);
                         }}
-                        className="bg-white/50 hover:bg-white p-4 rounded-2xl border border-red-200/50 text-left transition-all group"
+                        className="bg-white/50 hover:bg-white p-4 rounded-2xl border border-emerald-200/50 text-left transition-all group"
                       >
                         <div className="flex justify-between items-center mb-1">
                           <span className="font-bold text-sm">{format(parse(alt.start_time, "yyyy-MM-dd HH:mm", new Date()), "HH:mm")}</span>
-                          <span className="text-[10px] font-black bg-red-100 text-red-600 px-2 py-0.5 rounded-full">{alt.score}</span>
+                          <span className="text-[10px] font-black bg-emerald-100 text-emerald-600 px-2 py-0.5 rounded-full">{alt.score}</span>
                         </div>
                         <p className="text-[10px] italic opacity-70 line-clamp-1">{alt.explanation}</p>
                       </button>
@@ -519,16 +738,37 @@ export default function App() {
                       <div>
                         <p className="font-bold text-gray-900">{booking.guest_name}</p>
                         <p className="text-xs text-gray-400">{booking.service_name}</p>
+                        <p className="text-[10px] text-emerald-600 font-medium mt-1">
+                          {format(parse(booking.start_time, "yyyy-MM-dd HH:mm", new Date()), "MMM dd, yyyy")}
+                        </p>
                       </div>
-                      <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-lg text-[10px] font-bold uppercase">
-                        {format(parse(booking.start_time, "yyyy-MM-dd HH:mm", new Date()), "HH:mm")}
-                      </span>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-lg text-[10px] font-bold uppercase">
+                          {format(parse(booking.start_time, "yyyy-MM-dd HH:mm", new Date()), "HH:mm")}
+                        </span>
+                        <span className={cn(
+                          "px-2 py-0.5 rounded-md text-[8px] font-black uppercase tracking-tighter",
+                          booking.payment_status === "paid" ? "bg-emerald-500 text-white" : "bg-amber-400 text-white"
+                        )}>
+                          {booking.payment_status || 'pending'}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <Users size={14} />
-                      <span>{booking.therapist_name}</span>
-                      <span className="mx-1">•</span>
-                      <span>{booking.room_name}</span>
+                    <div className="flex items-center justify-between mt-3">
+                      <div className="flex items-center gap-2 text-xs text-gray-500">
+                        <Users size={14} />
+                        <span>{booking.therapist_name}</span>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          setBookingSearch(booking.guest_name);
+                          setShowAllBookings(true);
+                          setActiveTab("bookings");
+                        }}
+                        className="text-[10px] font-bold text-emerald-600 hover:text-emerald-700 underline uppercase tracking-wider"
+                      >
+                        View Payment
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -584,8 +824,21 @@ export default function App() {
               <div className="col-span-1 bg-white p-8 rounded-3xl border border-gray-100 shadow-sm">
                 <div className="flex justify-between items-center mb-6">
                   <h3 className="text-xl font-bold flex items-center gap-2">
-                    <PlusCircle className="text-emerald-600" /> New Booking
+                    {editingBookingId ? <RefreshCw className="text-amber-600" /> : <PlusCircle className="text-emerald-600" />}
+                    {editingBookingId ? "Modify Booking" : "New Booking"}
                   </h3>
+                  {editingBookingId && (
+                    <button 
+                      onClick={() => {
+                        setEditingBookingId(null);
+                        setBookingForm({ guestName: "", mobileNumber: "", serviceId: "", startTime: "", therapistId: "", roomId: "", isVip: false, offerCode: "", paymentStatus: "pending" });
+                        setAppliedOffer(null);
+                      }}
+                      className="text-xs font-bold text-gray-400 hover:text-gray-600"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
                 </div>
                 <form onSubmit={handleBooking} className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -594,6 +847,7 @@ export default function App() {
                       <input
                         type="text"
                         required
+                        maxLength={50}
                         value={bookingForm.guestName}
                         onChange={e => {
                           const val = e.target.value.replace(/[^a-zA-Z\s]/g, '');
@@ -610,9 +864,10 @@ export default function App() {
                         <input
                           type="tel"
                           required
+                          maxLength={10}
                           value={bookingForm.mobileNumber}
                           onChange={e => {
-                            const val = e.target.value.replace(/\D/g, '');
+                            const val = e.target.value.replace(/\D/g, '').slice(0, 10);
                             setBookingForm({...bookingForm, mobileNumber: val});
                           }}
                           className="w-full pl-11 pr-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-emerald-500 outline-none"
@@ -673,16 +928,30 @@ export default function App() {
                   </div>
                   
                   {bookingForm.serviceId && (
-                    <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                    <div className={cn(
+                      "p-4 rounded-2xl border transition-all",
+                      editingBookingId ? "bg-amber-50 border-amber-100" : "bg-emerald-50 border-emerald-100"
+                    )}>
                       <div className="flex justify-between items-center">
-                        <span className="text-sm font-medium text-emerald-800">Total Price</span>
+                        <span className={cn(
+                          "text-sm font-medium",
+                          editingBookingId ? "text-amber-800" : "text-emerald-800"
+                        )}>
+                          {editingBookingId ? "Updated Price" : "Total Price"}
+                        </span>
                         <div className="text-right">
                           {appliedOffer && (
-                            <p className="text-xs text-emerald-600 line-through">
+                            <p className={cn(
+                              "text-xs line-through",
+                              editingBookingId ? "text-amber-600" : "text-emerald-600"
+                            )}>
                               ${services.find(s => s.id.toString() === bookingForm.serviceId)?.price}
                             </p>
                           )}
-                          <p className="text-xl font-bold text-emerald-900">
+                          <p className={cn(
+                            "text-xl font-bold",
+                            editingBookingId ? "text-amber-900" : "text-emerald-900"
+                          )}>
                             ${calculatePrice().toFixed(2)}
                           </p>
                         </div>
@@ -965,10 +1234,28 @@ export default function App() {
                             return (
                               <td key={item.id} className="p-2">
                                 {booking ? (
-                                  <div className="bg-gray-100 text-gray-500 p-3 rounded-xl text-xs font-medium border border-gray-200">
-                                    <p className="font-bold">{booking.guest_name}</p>
-                                    <p className="opacity-70">{booking.service_name}</p>
-                                  </div>
+                                  <button
+                                    onClick={() => {
+                                      setBookingForm({ 
+                                        ...bookingForm, 
+                                        startTime: slot.start_time,
+                                        therapistId: viewBy === "therapist" ? item.id.toString() : "",
+                                        roomId: viewBy === "room" ? item.id.toString() : ""
+                                      });
+                                      setActiveTab("dashboard");
+                                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                                      setMessage({ type: "error", text: "This slot is currently booked. You can join the waitlist or choose another time." });
+                                    }}
+                                    className="w-full bg-gray-100 text-gray-500 p-3 rounded-xl text-xs font-medium border border-gray-200 hover:bg-amber-50 hover:text-amber-600 hover:border-amber-100 transition-all group"
+                                  >
+                                    <div className="group-hover:hidden">
+                                      <p className="font-bold">{booking.guest_name}</p>
+                                      <p className="opacity-70">{booking.service_name}</p>
+                                    </div>
+                                    <div className="hidden group-hover:block font-bold">
+                                      Join Waitlist
+                                    </div>
+                                  </button>
                                 ) : (
                                   <button
                                     onClick={() => {
@@ -1003,18 +1290,58 @@ export default function App() {
 
         {activeTab === "bookings" && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
-              <div className="flex items-center gap-4">
-                <h3 className="font-bold">Filter by Date:</h3>
-                <input
-                  type="date"
-                  value={availabilityDate}
-                  onChange={(e) => setAvailabilityDate(e.target.value)}
-                  className="px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-emerald-500 outline-none"
-                />
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-bold text-sm">Filter:</h3>
+                  <button 
+                    onClick={() => setShowAllBookings(true)}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                      showAllBookings ? "bg-emerald-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                    )}
+                  >
+                    All Bookings
+                  </button>
+                  <button 
+                    onClick={() => setShowAllBookings(false)}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                      !showAllBookings ? "bg-emerald-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                    )}
+                  >
+                    By Date
+                  </button>
+                </div>
+                {!showAllBookings && (
+                  <input
+                    type="date"
+                    value={availabilityDate}
+                    onChange={(e) => setAvailabilityDate(e.target.value)}
+                    className="px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
+                  />
+                )}
+                <div className="relative">
+                  <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
+                  <input
+                    type="text"
+                    placeholder="Search guest name..."
+                    value={bookingSearch}
+                    onChange={(e) => setBookingSearch(e.target.value)}
+                    className="pl-10 pr-10 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm w-64"
+                  />
+                  {bookingSearch && (
+                    <button 
+                      onClick={() => setBookingSearch("")}
+                      className="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="text-sm text-gray-400 font-medium">
-                Showing bookings for {format(parse(availabilityDate, "yyyy-MM-dd", new Date()), "MMMM dd, yyyy")}
+                {showAllBookings ? "Showing all historical bookings" : `Showing bookings for ${format(parse(availabilityDate, "yyyy-MM-dd", new Date()), "MMMM dd, yyyy")}`}
               </div>
             </div>
             <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
@@ -1032,7 +1359,11 @@ export default function App() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {bookings
-                    .filter(b => b.start_time.startsWith(availabilityDate))
+                    .filter(b => {
+                      const matchesDate = showAllBookings || b.start_time.startsWith(availabilityDate);
+                      const matchesSearch = b.guest_name.toLowerCase().includes(bookingSearch.toLowerCase());
+                      return matchesDate && matchesSearch;
+                    })
                     .map(booking => (
                     <tr key={booking.id} className="hover:bg-gray-50/50 transition-colors">
                       <td className="px-8 py-5">
@@ -1061,20 +1392,70 @@ export default function App() {
                         <p className="text-xs text-gray-400">{booking.room_name}</p>
                       </td>
                       <td className="px-8 py-5">
-                        <span className={cn(
-                          "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider",
-                          booking.status === "confirmed" ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"
-                        )}>
-                          {booking.status}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider w-fit",
+                              booking.status === "confirmed" ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"
+                            )}>
+                              {booking.status}
+                            </span>
+                            <span className={cn(
+                              "px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-tight",
+                              booking.payment_status === "paid" ? "bg-emerald-500 text-white" : "bg-amber-400 text-white"
+                            )}>
+                              {booking.payment_status || 'pending'}
+                            </span>
+                          </div>
+                          {booking.status === "cancelled" && (
+                            <div className="flex flex-col gap-0.5">
+                              {booking.cancellation_reason && (
+                                <p className="text-[10px] text-gray-400 italic leading-tight max-w-[150px]">
+                                  Reason: {booking.cancellation_reason}
+                                </p>
+                              )}
+                              {booking.refund_status && (
+                                <p className={cn(
+                                  "text-[10px] font-bold uppercase",
+                                  booking.refund_status === "full" ? "text-emerald-500" : "text-amber-500"
+                                )}>
+                                  Refund: {booking.refund_status}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         {booking.reallocated === 1 && (
-                          <span className="ml-2 px-2 py-1 bg-violet-50 text-violet-600 rounded-full text-[10px] font-black uppercase">AI Reallocated</span>
+                          <span className="mt-1 inline-block px-2 py-1 bg-violet-50 text-violet-600 rounded-full text-[10px] font-black uppercase">AI Reallocated</span>
                         )}
                       </td>
-                      <td className="px-8 py-5 text-right">
+                      <td className="px-8 py-5 text-right flex items-center justify-end gap-3">
+                        {booking.status === "confirmed" && booking.payment_status !== "paid" && (
+                          <button 
+                            onClick={async () => {
+                              try {
+                                const res = await fetch(`/api/bookings/${booking.id}`, {
+                                  method: "PUT",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ payment_status: 'paid' })
+                                });
+                                const data = await res.json();
+                                if (data.success) {
+                                  setMessage({ type: "success", text: "Payment marked as paid!" });
+                                  fetchData();
+                                }
+                              } catch (err) {
+                                console.error(err);
+                              }
+                            }}
+                            className="text-emerald-600 hover:text-emerald-700 font-bold text-sm"
+                          >
+                            Mark Paid
+                          </button>
+                        )}
                         {booking.status === "confirmed" && (
                           <button 
-                            onClick={() => cancelBooking(booking.id)}
+                            onClick={() => cancelBooking(booking)}
                             className="text-red-500 hover:text-red-700 font-bold text-sm"
                           >
                             Cancel
@@ -1168,6 +1549,189 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Payment Confirmation Modal */}
+      <AnimatePresence>
+        {showPaymentModal && lastBookingData && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl"
+            >
+              <div className="p-8">
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-2xl font-bold text-gray-900">Booking Confirmation</h3>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      <p className="text-emerald-600 text-xs font-bold uppercase tracking-wider">Service Available & Confirmed</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowPaymentModal(false)}
+                    className="w-10 h-10 rounded-full bg-gray-50 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="bg-emerald-50 rounded-2xl p-4 mb-6 border border-emerald-100">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Service</span>
+                    <span className="font-bold text-emerald-900">{lastBookingData.serviceName}</span>
+                  </div>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Time</span>
+                    <span className="font-bold text-emerald-900">{format(parse(lastBookingData.startTime, "yyyy-MM-dd HH:mm", new Date()), "MMM dd, HH:mm")}</span>
+                  </div>
+                  <div className="h-px bg-emerald-200/50 my-2"></div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Total Amount</span>
+                    <span className="text-xl font-bold text-emerald-900">${lastBookingData.price.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Choose Payment Method</p>
+                  
+                  <button
+                    onClick={() => setPaymentMethod("counter")}
+                    className={cn(
+                      "w-full p-4 rounded-2xl border-2 transition-all flex items-center gap-4",
+                      paymentMethod === "counter" 
+                        ? "border-emerald-500 bg-emerald-50/50" 
+                        : "border-gray-100 hover:border-gray-200"
+                    )}
+                  >
+                    <div className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center",
+                      paymentMethod === "counter" ? "bg-emerald-500 text-white" : "bg-gray-100 text-gray-400"
+                    )}>
+                      <Users size={20} />
+                    </div>
+                    <div className="text-left">
+                      <p className="font-bold text-gray-900">Pay at Counter</p>
+                      <p className="text-xs text-gray-500">Post-service payment at reception</p>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => setPaymentMethod("qr")}
+                    className={cn(
+                      "w-full p-4 rounded-2xl border-2 transition-all flex items-center gap-4",
+                      paymentMethod === "qr" 
+                        ? "border-emerald-500 bg-emerald-50/50" 
+                        : "border-gray-100 hover:border-gray-200"
+                    )}
+                  >
+                    <div className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center",
+                      paymentMethod === "qr" ? "bg-emerald-500 text-white" : "bg-gray-100 text-gray-400"
+                    )}>
+                      <QrCode size={20} />
+                    </div>
+                    <div className="text-left">
+                      <p className="font-bold text-gray-900">Pay via QR (Advance)</p>
+                      <p className="text-xs text-gray-500">Scan and pay now for faster check-in</p>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => setPaymentMethod("card")}
+                    className={cn(
+                      "w-full p-4 rounded-2xl border-2 transition-all flex items-center gap-4",
+                      paymentMethod === "card" 
+                        ? "border-emerald-500 bg-emerald-50/50" 
+                        : "border-gray-100 hover:border-gray-200"
+                    )}
+                  >
+                    <div className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center",
+                      paymentMethod === "card" ? "bg-emerald-500 text-white" : "bg-gray-100 text-gray-400"
+                    )}>
+                      <CreditCard size={20} />
+                    </div>
+                    <div className="text-left">
+                      <p className="font-bold text-gray-900">Credit/Debit Card</p>
+                      <p className="text-xs text-gray-500">Secure online payment (Advance)</p>
+                    </div>
+                  </button>
+                </div>
+
+                {paymentMethod === "qr" && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="mb-8 flex flex-col items-center p-6 bg-gray-50 rounded-3xl border border-dashed border-gray-200"
+                  >
+                    <div className="bg-white p-4 rounded-2xl shadow-sm mb-4">
+                      <QrCode size={120} className="text-gray-900" />
+                    </div>
+                    <p className="text-xs text-gray-400 text-center">Scan this QR code with any payment app to complete your advance payment.</p>
+                  </motion.div>
+                )}
+
+                {paymentMethod === "card" && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="mb-8 space-y-3 p-6 bg-gray-50 rounded-3xl border border-gray-100"
+                  >
+                    <div className="relative">
+                      <input 
+                        type="text" 
+                        placeholder="Card Number" 
+                        className="w-full p-3 rounded-xl border border-gray-200 focus:border-emerald-500 outline-none text-sm font-mono"
+                        defaultValue="**** **** **** 4242"
+                      />
+                      <CreditCard className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300" size={16} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <input 
+                        type="text" 
+                        placeholder="MM/YY" 
+                        className="w-full p-3 rounded-xl border border-gray-200 focus:border-emerald-500 outline-none text-sm font-mono"
+                        defaultValue="12/28"
+                      />
+                      <input 
+                        type="password" 
+                        placeholder="CVV" 
+                        className="w-full p-3 rounded-xl border border-gray-200 focus:border-emerald-500 outline-none text-sm font-mono"
+                        defaultValue="***"
+                      />
+                    </div>
+                  </motion.div>
+                )}
+
+                <button
+                  onClick={async () => {
+                    if (paymentMethod === "qr" || paymentMethod === "card") {
+                      try {
+                        await fetch(`/api/bookings/${lastBookingData.id}`, {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ payment_status: 'paid' })
+                        });
+                        fetchData();
+                      } catch (err) {
+                        console.error("Failed to update payment status", err);
+                      }
+                    }
+                    const methodLabel = paymentMethod === "qr" ? "QR Payment" : paymentMethod === "card" ? "Card Payment" : "Pay at Counter";
+                    setMessage({ type: "success", text: `Booking Confirmed with ${methodLabel}! We look forward to seeing you.` });
+                    setShowPaymentModal(false);
+                  }}
+                  className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all active:scale-[0.98]"
+                >
+                  Confirm & Finalize Booking
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
