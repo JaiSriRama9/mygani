@@ -15,7 +15,6 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS guests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    mobile TEXT,
     is_vip INTEGER DEFAULT 0
   );
 
@@ -52,8 +51,6 @@ db.exec(`
     start_time TEXT NOT NULL,
     status TEXT DEFAULT 'confirmed',
     reallocated INTEGER DEFAULT 0,
-    offer_code TEXT,
-    final_price REAL,
     FOREIGN KEY(guest_id) REFERENCES guests(id),
     FOREIGN KEY(service_id) REFERENCES services(id),
     FOREIGN KEY(therapist_id) REFERENCES therapists(id),
@@ -81,22 +78,6 @@ db.exec(`
     FOREIGN KEY(guest_id) REFERENCES guests(id)
   );
 `);
-
-// Migrations: Add missing columns if they don't exist
-const addColumnIfNotExists = (table: string, column: string, type: string) => {
-  const info = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
-  if (!info.some(col => col.name === column)) {
-    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
-    console.log(`Added column ${column} to ${table}`);
-  }
-};
-
-addColumnIfNotExists("guests", "mobile", "TEXT");
-addColumnIfNotExists("bookings", "offer_code", "TEXT");
-addColumnIfNotExists("bookings", "final_price", "REAL");
-addColumnIfNotExists("bookings", "cancellation_reason", "TEXT");
-addColumnIfNotExists("bookings", "refund_status", "TEXT");
-addColumnIfNotExists("bookings", "payment_status", "TEXT DEFAULT 'pending'");
 
 // Seed Data
 const seedData = () => {
@@ -224,40 +205,16 @@ async function startServer() {
   };
 
   app.post("/api/bookings", (req, res) => {
-    const { guestName, mobileNumber, serviceId, startTime, isVip, offerCode } = req.body;
+    const { guestName, serviceId, startTime, isVip } = req.body;
 
     // 1. Find or create guest
     let guest = db.prepare("SELECT * FROM guests WHERE name = ?").get(guestName) as any;
     if (!guest) {
-      const result = db.prepare("INSERT INTO guests (name, mobile, is_vip) VALUES (?, ?, ?)").run(guestName, mobileNumber, isVip ? 1 : 0);
-      guest = { id: result.lastInsertRowid, name: guestName, mobile: mobileNumber, is_vip: isVip ? 1 : 0 };
-    } else if (mobileNumber && !guest.mobile) {
-      db.prepare("UPDATE guests SET mobile = ? WHERE id = ?").run(mobileNumber, guest.id);
+      const result = db.prepare("INSERT INTO guests (name, is_vip) VALUES (?, ?)").run(guestName, isVip ? 1 : 0);
+      guest = { id: result.lastInsertRowid, name: guestName, is_vip: isVip ? 1 : 0 };
     }
 
     const service = db.prepare("SELECT * FROM services WHERE id = ?").get(serviceId) as any;
-    
-    // Working hours check
-    const bookingTime = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-    const hour = bookingTime.getHours();
-    if (hour < 9 || hour >= 19) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Spa is only open from 9:00 AM to 7:00 PM." 
-      });
-    }
-
-    // Calculate final price with offer
-    const OFFERS: Record<string, number> = {
-      "SPA10": 0.1,
-      "WELCOME20": 0.2,
-      "AI_SPECIAL": 0.15
-    };
-    let finalPrice = service.price;
-    if (offerCode && OFFERS[offerCode.toUpperCase()]) {
-      finalPrice = service.price * (1 - OFFERS[offerCode.toUpperCase()]);
-    }
-
     const endTime = format(addMinutes(parse(startTime, "yyyy-MM-dd HH:mm", new Date()), service.duration), "yyyy-MM-dd HH:mm");
 
     // 2. Check Availability (Therapist and Room)
@@ -267,113 +224,57 @@ async function startServer() {
     let selectedTherapist = null;
     let selectedRoom = null;
 
-    // If therapistId is provided, try to use it
-    if (req.body.therapistId) {
-      const t = therapists.find(th => th.id.toString() === req.body.therapistId);
-      if (t) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.therapist_id = ? AND b.status = 'confirmed'
-        `).all(t.id) as any[];
+    for (const t of therapists) {
+      const conflict = db.prepare(`
+        SELECT b.*, s.duration 
+        FROM bookings b 
+        JOIN services s ON b.service_id = s.id 
+        WHERE b.therapist_id = ? AND b.status = 'confirmed'
+      `).all(t.id) as any[];
 
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
+      const isBusy = conflict.some(c => {
+        const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
+        const bEnd = addMinutes(bStart, c.duration);
+        const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
+        const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
+        return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
+               isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
+               (reqStart <= bStart && reqEnd >= bEnd);
+      });
 
-        if (!isBusy) selectedTherapist = t;
+      if (!isBusy) {
+        selectedTherapist = t;
+        break;
       }
     }
 
-    // Fallback to auto-selection if no therapist selected or provided one is busy
-    if (!selectedTherapist) {
-      for (const t of therapists) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.therapist_id = ? AND b.status = 'confirmed'
-        `).all(t.id) as any[];
+    for (const r of rooms) {
+      const conflict = db.prepare(`
+        SELECT b.*, s.duration 
+        FROM bookings b 
+        JOIN services s ON b.service_id = s.id 
+        WHERE b.room_id = ? AND b.status = 'confirmed'
+      `).all(r.id) as any[];
 
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
+      const isBusy = conflict.some(c => {
+        const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
+        const bEnd = addMinutes(bStart, c.duration);
+        const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
+        const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
+        return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
+               isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
+               (reqStart <= bStart && reqEnd >= bEnd);
+      });
 
-        if (!isBusy) {
-          selectedTherapist = t;
-          break;
-        }
-      }
-    }
-
-    // If roomId is provided, try to use it
-    if (req.body.roomId) {
-      const r = rooms.find(rm => rm.id.toString() === req.body.roomId);
-      if (r) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.room_id = ? AND b.status = 'confirmed'
-        `).all(r.id) as any[];
-
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
-
-        if (!isBusy) selectedRoom = r;
-      }
-    }
-
-    // Fallback to auto-selection if no room selected or provided one is busy
-    if (!selectedRoom) {
-      for (const r of rooms) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.room_id = ? AND b.status = 'confirmed'
-        `).all(r.id) as any[];
-
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
-
-        if (!isBusy) {
-          selectedRoom = r;
-          break;
-        }
+      if (!isBusy) {
+        selectedRoom = r;
+        break;
       }
     }
 
     if (selectedTherapist && selectedRoom) {
-      const result = db.prepare("INSERT INTO bookings (guest_id, service_id, therapist_id, room_id, start_time, offer_code, final_price, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(guest.id, serviceId, selectedTherapist.id, selectedRoom.id, startTime, offerCode, finalPrice, 'pending');
+      const result = db.prepare("INSERT INTO bookings (guest_id, service_id, therapist_id, room_id, start_time) VALUES (?, ?, ?, ?, ?)")
+        .run(guest.id, serviceId, selectedTherapist.id, selectedRoom.id, startTime);
       
       // Notification
       db.prepare("INSERT INTO notifications (guest_id, message, type) VALUES (?, ?, ?)")
@@ -386,119 +287,16 @@ async function startServer() {
         details: { therapist: selectedTherapist.name, room: selectedRoom.name }
       });
     } else {
-      // AI Logic: Find alternative slots
-      const date = startTime.split(" ")[0];
-      const allSlots = db.prepare("SELECT * FROM slots WHERE start_time LIKE ?").all(date + "%") as any[];
-      
-      const alternatives = allSlots
-        .filter(s => s.start_time !== startTime)
-        .map(s => {
-          const { score, explanation } = calculateSlotScore(s, 0, 0);
-          return { ...s, score, explanation };
-        })
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3);
-
       res.status(400).json({ 
         success: false, 
-        message: "Slot unavailable. Here are some AI-recommended alternatives:",
-        alternatives
+        message: "Slot unavailable. Would you like to join the waitlist?" 
       });
-    }
-  });
-
-  app.put("/api/bookings/:id", (req, res) => {
-    const { id } = req.params;
-    const { guestName, mobileNumber, serviceId, startTime, isVip, offerCode, therapistId, roomId, payment_status } = req.body;
-
-    const booking = db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as any;
-    if (!booking) return res.status(404).json({ success: false, message: "Booking not found" });
-
-    // Handle simple status updates (like payment_status)
-    if (payment_status && !serviceId) {
-       db.prepare("UPDATE bookings SET payment_status = ? WHERE id = ?").run(payment_status, id);
-       return res.json({ success: true, message: "Payment status updated!" });
-    }
-
-    const service = db.prepare("SELECT * FROM services WHERE id = ?").get(serviceId) as any;
-    const endTime = format(addMinutes(parse(startTime, "yyyy-MM-dd HH:mm", new Date()), service.duration), "yyyy-MM-dd HH:mm");
-
-    // Check Availability (Therapist and Room) - excluding current booking
-    const therapists = db.prepare("SELECT * FROM therapists").all() as any[];
-    const rooms = db.prepare("SELECT * FROM rooms").all() as any[];
-
-    let selectedTherapist = null;
-    let selectedRoom = null;
-
-    if (therapistId) {
-      const t = therapists.find(th => th.id.toString() === therapistId);
-      if (t) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.therapist_id = ? AND b.status = 'confirmed' AND b.id != ?
-        `).all(t.id, id) as any[];
-
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
-        if (!isBusy) selectedTherapist = t;
-      }
-    }
-
-    if (roomId) {
-      const r = rooms.find(rm => rm.id.toString() === roomId);
-      if (r) {
-        const conflict = db.prepare(`
-          SELECT b.*, s.duration 
-          FROM bookings b 
-          JOIN services s ON b.service_id = s.id 
-          WHERE b.room_id = ? AND b.status = 'confirmed' AND b.id != ?
-        `).all(r.id, id) as any[];
-
-        const isBusy = conflict.some(c => {
-          const bStart = parse(c.start_time, "yyyy-MM-dd HH:mm", new Date());
-          const bEnd = addMinutes(bStart, c.duration);
-          const reqStart = parse(startTime, "yyyy-MM-dd HH:mm", new Date());
-          const reqEnd = parse(endTime, "yyyy-MM-dd HH:mm", new Date());
-          return isWithinInterval(reqStart, { start: bStart, end: bEnd }) || 
-                 isWithinInterval(reqEnd, { start: bStart, end: bEnd }) ||
-                 (reqStart <= bStart && reqEnd >= bEnd);
-        });
-        if (!isBusy) selectedRoom = r;
-      }
-    }
-
-    const OFFERS: Record<string, number> = {
-      "SPA10": 0.1,
-      "WELCOME20": 0.2,
-      "AI_SPECIAL": 0.15
-    };
-    let finalPrice = service.price;
-    if (offerCode && OFFERS[offerCode.toUpperCase()]) {
-      finalPrice = service.price * (1 - OFFERS[offerCode.toUpperCase()]);
-    }
-
-    if (selectedTherapist && selectedRoom) {
-      db.prepare("UPDATE bookings SET service_id = ?, therapist_id = ?, room_id = ?, start_time = ?, offer_code = ?, final_price = ?, payment_status = ? WHERE id = ?")
-        .run(serviceId, selectedTherapist.id, selectedRoom.id, startTime, offerCode, finalPrice, payment_status || 'pending', id);
-      
-      res.json({ success: true, message: "Booking modified successfully!" });
-    } else {
-      res.status(400).json({ success: false, message: "Selected time/therapist/room is unavailable for modification." });
     }
   });
 
   app.get("/api/bookings", (req, res) => {
     const bookings = db.prepare(`
-      SELECT b.*, g.name as guest_name, g.mobile as guest_mobile, s.name as service_name, t.name as therapist_name, r.name as room_name
+      SELECT b.*, g.name as guest_name, s.name as service_name, t.name as therapist_name, r.name as room_name
       FROM bookings b
       JOIN guests g ON b.guest_id = g.id
       JOIN services s ON b.service_id = s.id
@@ -511,12 +309,10 @@ async function startServer() {
 
   app.post("/api/bookings/:id/cancel", (req, res) => {
     const { id } = req.params;
-    const { reason, refundStatus } = req.body;
     const booking = db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as any;
     if (!booking) return res.status(404).json({ message: "Booking not found" });
 
-    db.prepare("UPDATE bookings SET status = 'cancelled', cancellation_reason = ?, refund_status = ? WHERE id = ?")
-      .run(reason || "No reason provided", refundStatus || "none", id);
+    db.prepare("UPDATE bookings SET status = 'cancelled' WHERE id = ?").run(id);
 
     // AI Reallocation Logic
     const waitlist = db.prepare("SELECT w.*, g.is_vip, s.duration, s.name as service_name FROM waitlist w JOIN guests g ON w.guest_id = g.id JOIN services s ON w.service_id = s.id WHERE w.status = 'waiting'").all() as any[];
@@ -548,14 +344,12 @@ async function startServer() {
   });
 
   app.post("/api/waitlist", (req, res) => {
-    const { guestName, mobileNumber, serviceId, preferredTime, isVip } = req.body;
+    const { guestName, serviceId, preferredTime, isVip } = req.body;
     
     let guest = db.prepare("SELECT * FROM guests WHERE name = ?").get(guestName) as any;
     if (!guest) {
-      const result = db.prepare("INSERT INTO guests (name, mobile, is_vip) VALUES (?, ?, ?)").run(guestName, mobileNumber, isVip ? 1 : 0);
-      guest = { id: result.lastInsertRowid, name: guestName, mobile: mobileNumber, is_vip: isVip ? 1 : 0 };
-    } else if (mobileNumber && !guest.mobile) {
-      db.prepare("UPDATE guests SET mobile = ? WHERE id = ?").run(mobileNumber, guest.id);
+      const result = db.prepare("INSERT INTO guests (name, is_vip) VALUES (?, ?)").run(guestName, isVip ? 1 : 0);
+      guest = { id: result.lastInsertRowid, name: guestName, is_vip: isVip ? 1 : 0 };
     }
 
     const service = db.prepare("SELECT * FROM services WHERE id = ?").get(serviceId) as any;
@@ -572,7 +366,7 @@ async function startServer() {
 
   app.get("/api/waitlist", (req, res) => {
     const waitlist = db.prepare(`
-      SELECT w.*, g.name as guest_name, g.mobile as guest_mobile, s.name as service_name
+      SELECT w.*, g.name as guest_name, s.name as service_name
       FROM waitlist w
       JOIN guests g ON w.guest_id = g.id
       JOIN services s ON w.service_id = s.id
@@ -593,24 +387,6 @@ async function startServer() {
     res.json(recommendations);
   });
 
-  app.get("/api/availability", (req, res) => {
-    const { date } = req.query;
-    if (!date) return res.status(400).json({ message: "Date is required" });
-
-    const therapists = db.prepare("SELECT * FROM therapists").all();
-    const rooms = db.prepare("SELECT * FROM rooms").all();
-    const slots = db.prepare("SELECT * FROM slots WHERE start_time LIKE ?").all(date + "%");
-    const bookings = db.prepare(`
-      SELECT b.*, g.name as guest_name, s.duration, s.name as service_name
-      FROM bookings b
-      JOIN guests g ON b.guest_id = g.id
-      JOIN services s ON b.service_id = s.id
-      WHERE b.start_time LIKE ? AND b.status = 'confirmed'
-    `).all(date + "%");
-
-    res.json({ therapists, rooms, slots, bookings });
-  });
-
   app.get("/api/notifications", (req, res) => {
     const notifications = db.prepare(`
       SELECT n.*, g.name as guest_name
@@ -622,19 +398,16 @@ async function startServer() {
   });
 
   app.get("/api/dashboard", (req, res) => {
-    const { date } = req.query;
-    const dateFilter = date ? `${date}%` : "%";
-
-    const totalBookings = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE status = 'confirmed' AND start_time LIKE ?").get(dateFilter) as any;
-    const cancelledBookings = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE status = 'cancelled' AND start_time LIKE ?").get(dateFilter) as any;
-    const waitlisted = db.prepare("SELECT COUNT(*) as count FROM waitlist WHERE status = 'waiting' AND preferred_time LIKE ?").get(dateFilter) as any;
-    const reallocatedCount = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE reallocated = 1 AND start_time LIKE ?").get(dateFilter) as any;
+    const totalBookings = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE status = 'confirmed'").get() as any;
+    const cancelledBookings = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE status = 'cancelled'").get() as any;
+    const waitlisted = db.prepare("SELECT COUNT(*) as count FROM waitlist WHERE status = 'waiting'").get() as any;
+    const reallocatedCount = db.prepare("SELECT COUNT(*) as count FROM bookings WHERE reallocated = 1").get() as any;
     
-    const totalSlots = db.prepare("SELECT COUNT(*) as count FROM slots WHERE start_time LIKE ?").get(dateFilter) as any;
+    const totalSlots = db.prepare("SELECT COUNT(*) as count FROM slots").get() as any;
     const utilization = totalSlots.count > 0 ? (totalBookings.count / (totalSlots.count * 2)) * 100 : 0; // 2 rooms
 
-    const peakDemand = db.prepare("SELECT COUNT(*) as count FROM bookings b JOIN slots s ON b.start_time = s.start_time WHERE s.is_peak = 1 AND b.start_time LIKE ?").get(dateFilter) as any;
-    const offPeakDemand = db.prepare("SELECT COUNT(*) as count FROM bookings b JOIN slots s ON b.start_time = s.start_time WHERE s.is_peak = 0 AND b.start_time LIKE ?").get(dateFilter) as any;
+    const peakDemand = db.prepare("SELECT COUNT(*) as count FROM bookings b JOIN slots s ON b.start_time = s.start_time WHERE s.is_peak = 1").get() as any;
+    const offPeakDemand = db.prepare("SELECT COUNT(*) as count FROM bookings b JOIN slots s ON b.start_time = s.start_time WHERE s.is_peak = 0").get() as any;
 
     res.json({
       totalBookings: totalBookings.count,

@@ -28,7 +28,6 @@ export interface Booking {
   id: number;
   guest_id: number;
   guest_name: string;
-  guest_mobile?: string;
   service_id: number;
   service_name: string;
   therapist_id: number;
@@ -38,18 +37,12 @@ export interface Booking {
   start_time: string;
   status: string;
   reallocated: number;
-  offer_code?: string;
-  final_price?: number;
-  cancellation_reason?: string;
-  refund_status?: "none" | "pending" | "refunded";
-  payment_status?: "paid" | "pending" | "failed";
 }
 
 export interface WaitlistEntry {
   id: number;
   guest_id: number;
   guest_name: string;
-  guest_mobile?: string;
   service_id: number;
   service_name: string;
   preferred_time: string;

@@ -1,5 +1,5 @@
 {
   "name": "SmartSpa AI",
-  "description": "Intelligent Spa Slot Allocation and Waitlist Optimization prototype for resort operations.",
+  "description": "Intelligent Spa Slot Allocation and Waitlist Optimization system with AI-driven scoring and notifications.",
   "requestFramePermissions": []
 }
