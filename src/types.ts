@@ -30,6 +30,7 @@ export interface Booking {
   guest_name: string;
   service_id: number;
   service_name: string;
+  service_duration: number;
   therapist_id: number;
   therapist_name: string;
   room_id: number;
